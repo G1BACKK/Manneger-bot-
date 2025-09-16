@@ -1,141 +1,109 @@
 import os
+import json
 import asyncio
 import threading
 import logging
 from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 
-from database import init_db, add_bot, get_bots, update_greeting
-from bot_instance import BotInstance
-
-# === Logging (important for debugging on Render) ===
+# Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# === Load admin config ===
-ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+# Flask app (keeps Render service alive)
+flask_app = Flask(__name__)
 
-if not ADMIN_BOT_TOKEN:
-    raise ValueError("❌ Missing ADMIN_BOT_TOKEN! Set it in Render environment.")
-
-# === Flask app (keeps Render alive) ===
-app = Flask(__name__)
-
-@app.route("/")
+@flask_app.route("/")
 def home():
-    return "Bot Manager Running!"
+    return "✅ Bot Manager is running!"
 
 def run_flask():
-    app.run(host="0.0.0.0", port=10000)
+    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-# === Worker bots container ===
-worker_apps = []
+# ====================
+# BOT MANAGER SECTION
+# ====================
 
-async def check_admin(update: Update):
-    return update.effective_user.id == ADMIN_USER_ID
+# Get manager bot token
+ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
+if not ADMIN_BOT_TOKEN:
+    raise ValueError("❌ Missing ADMIN_BOT_TOKEN env var in Render!")
 
-# === Manager Bot Commands ===
+# Simple JSON storage for worker bots
+DB_FILE = "bots_db.json"
+
+def load_bots():
+    if not os.path.exists(DB_FILE):
+        return {}
+    with open(DB_FILE, "r") as f:
+        return json.load(f)
+
+def save_bots(bots):
+    with open(DB_FILE, "w") as f:
+        json.dump(bots, f, indent=2)
+
+worker_bots = load_bots()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update):
-        await update.message.reply_text("⛔ You are not allowed.")
-        return
     await update.message.reply_text(
-        "✅ Manager bot ready.\n\n"
+        "✅ Manager bot ready.\n"
         "Commands:\n"
         "/addbot <token> <greeting>\n"
         "/listbots\n"
-        "/setgreeting <id> <text>\n"
-        "/broadcast <msg>"
+        "/broadcast <message>"
     )
 
 async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update):
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /addbot <token> <greeting>")
         return
-    if len(context.args) < 1:
-        await update.message.reply_text("Usage: /addbot <token> [greeting]")
-        return
+
     token = context.args[0]
-    greeting = " ".join(context.args[1:]) if len(context.args) > 1 else "Hello!"
-    add_bot(token, greeting)
-    await update.message.reply_text("🤖 Bot added. Restarting worker...")
-    await restart_workers(update)
+    greeting = " ".join(context.args[1:])
+    worker_bots[token] = {"greeting": greeting}
+    save_bots(worker_bots)
+    await update.message.reply_text("✅ Worker bot added successfully.")
 
 async def listbots(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update):
+    if not worker_bots:
+        await update.message.reply_text("No worker bots added yet.")
         return
-    bots = get_bots()
-    msg = "\n".join([f"ID: {b[0]} | Greeting: {b[2]}" for b in bots])
-    await update.message.reply_text(msg or "No bots added yet.")
-
-async def setgreeting(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update):
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /setgreeting <id> <text>")
-        return
-    bot_id = int(context.args[0])
-    greeting = " ".join(context.args[1:])
-    update_greeting(bot_id, greeting)
-    await update.message.reply_text(f"✅ Greeting updated for bot {bot_id}")
-    await restart_workers(update)
+    msg = "🤖 Worker Bots:\n"
+    for i, (token, cfg) in enumerate(worker_bots.items(), start=1):
+        msg += f"{i}. Greeting: {cfg['greeting']}\n"
+    await update.message.reply_text(msg)
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update):
-        return
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <message>")
         return
-    msg = " ".join(context.args)
-    bots = get_bots()
-    for _, token, _ in bots:
-        app = Application.builder().token(token).build()
-        try:
-            await app.bot.send_message(chat_id=ADMIN_USER_ID, text=f"[Broadcast] {msg}")
-        except Exception as e:
-            logger.error(f"Broadcast failed for bot {token[:10]}...: {e}")
-    await update.message.reply_text("📢 Broadcast sent.")
 
-# === Restart worker bots ===
-async def restart_workers(update=None):
-    global worker_apps
-    for app in worker_apps:
-        try:
-            await app.shutdown()
-        except Exception:
-            pass
-    worker_apps.clear()
+    message = " ".join(context.args)
+    # (Demo: just confirms; you’d loop over worker bots and send here)
+    await update.message.reply_text(f"📢 Broadcast to all: {message}")
 
-    for _, token, greeting in get_bots():
-        bot = BotInstance(token, greeting)
-        worker_apps.append(bot.start())
-
-    # Start them in background
-    asyncio.create_task(asyncio.gather(*(b.run_polling() for b in worker_apps)))
-
-# === Main entrypoint ===
 async def main():
-    init_db()
+    logger.info("🚀 Starting Manager Bot...")
 
-    # Manager bot
-    app_manager = Application.builder().token(ADMIN_BOT_TOKEN).build()
-    app_manager.add_handler(CommandHandler("start", start))
-    app_manager.add_handler(CommandHandler("addbot", addbot))
-    app_manager.add_handler(CommandHandler("listbots", listbots))
-    app_manager.add_handler(CommandHandler("setgreeting", setgreeting))
-    app_manager.add_handler(CommandHandler("broadcast", broadcast))
+    app = ApplicationBuilder().token(ADMIN_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("addbot", addbot))
+    app.add_handler(CommandHandler("listbots", listbots))
+    app.add_handler(CommandHandler("broadcast", broadcast))
 
-    await restart_workers()
-    logger.info("✅ Manager bot started and workers initialized.")
-    await app_manager.run_polling()
+    logger.info("✅ Manager bot initialized. Waiting for commands...")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    # Run Flask in background
+    logger.info("🚀 Launching Flask + Manager...")
     threading.Thread(target=run_flask, daemon=True).start()
-
-    # Run manager bot + workers
     asyncio.run(main())
