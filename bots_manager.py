@@ -12,14 +12,18 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Enable logging
+# ====================
+# Logging Setup
+# ====================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# Flask app (keeps Render service alive)
+# ====================
+# Flask (keep service alive on Render)
+# ====================
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -30,15 +34,13 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 # ====================
-# BOT MANAGER SECTION
+# Bot Manager
 # ====================
 
-# Get manager bot token
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 if not ADMIN_BOT_TOKEN:
     raise ValueError("❌ Missing ADMIN_BOT_TOKEN env var in Render!")
 
-# Simple JSON storage for worker bots
 DB_FILE = "bots_db.json"
 
 def load_bots():
@@ -88,7 +90,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = " ".join(context.args)
-    # (Demo: just confirms; you’d loop over worker bots and send here)
     await update.message.reply_text(f"📢 Broadcast to all: {message}")
 
 async def main():
